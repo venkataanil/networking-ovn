@@ -55,6 +55,47 @@ class ChassisEvent(row_event.RowEvent):
             self.l3_plugin.schedule_unhosted_gateways()
 
 
+class ConnectionEvent(row_event.RowEvent):
+    """Chassis create update delete event."""
+
+    def __init__(self, driver):
+        self.driver = driver
+        self.l3_plugin = directory.get_plugin(constants.L3)
+        table = 'Connection'
+        events = (self.ROW_CREATE, self.ROW_UPDATE, self.ROW_DELETE)
+        super(ConnectionEvent, self).__init__(events, table, None)
+        self.event_name = 'ConnectionEvent'
+
+    def update_chassis(self, ips):
+        # Connection table list the remote "ip" which is active. Now we run
+        # through all chassis and set it as acive if the ip belongs to it.
+        # Then we notify the plugin, list of active and inactive chassis.
+        active = set()
+        inactive = set()
+        for chassis in self._tables['Chassis'].rows.values():
+            for encap in chassis.encaps:
+                if encap.ip in ips:
+                    active.add(chassis.name)
+                    break
+            if chassis.name not in active:
+                inactive.add(chassis.name)
+        LOG.debug("==================== active %s ", active)
+        LOG.debug("==================== inactive %s", inactive)
+
+    def run(self, event, row, old):
+        if event != self.ROW_DELETE:
+            ips = set()
+            connections = row.status.get('active_connections', '').split(',')
+            LOG.debug("============== active_connections = %s", connections)
+            for conn in connections:
+                if conn.startswith('tcp:'):
+                    ip = conn.split(':')[1]
+                    ips.add(ip)
+            LOG.debug("============ ips = %s", ips)
+            if(ips):
+                self.update_chassis(ips)
+
+
 class LogicalSwitchPortCreateUpEvent(row_event.RowEvent):
     """Row create event - Logical_Switch_Port 'up' = True.
 
@@ -156,6 +197,7 @@ class BaseOvnSbIdl(connection.OvsdbIdl):
         helper = idlutils.get_schema_helper(connection_string, schema_name)
         helper.register_table('Chassis')
         helper.register_table('Encap')
+        helper.register_table('Connection')
         if ovn_config.is_ovn_metadata_enabled():
             helper.register_table('Port_Binding')
             helper.register_table('Datapath_Binding')
@@ -249,6 +291,7 @@ class OvnSbIdl(OvnIdl):
         helper = idlutils.get_schema_helper(connection_string, schema_name)
         helper.register_table('Chassis')
         helper.register_table('Encap')
+        helper.register_table('Connection')
         if ovn_config.is_ovn_metadata_enabled():
             helper.register_table('Port_Binding')
             helper.register_table('Datapath_Binding')
@@ -265,7 +308,9 @@ class OvnSbIdl(OvnIdl):
         the events to make notify work.
         """
         self._chassis_event = ChassisEvent(self.driver)
-        self.notify_handler.watch_events([self._chassis_event])
+        self._connection_event = ConnectionEvent(self.driver)
+        self.notify_handler.watch_events([self._chassis_event,
+                                          self._connection_event])
 
 
 def _check_and_set_ssl_files(schema_name):
